@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual envs (deploy venv + local venv)
+.env/
+venv/
+
+# Runtime data (contains user/phone data - never commit)
+blast_data.json
+
+# OS
+.DS_Store

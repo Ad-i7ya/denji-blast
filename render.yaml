@@ -1,0 +1,21 @@
+# Render Blueprint for DENJI BLAST v4.0 (free tier)
+# Deploy: Render dashboard -> New -> Blueprint -> paste this repo.
+# After creation, set the BOT_TOKEN secret in Render (Dashboard -> Environment).
+services:
+  - type: web
+    name: denji-blast
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false # set manually in the Render dashboard (secret)
+      - key: WEBHOOK_PATH
+        value: /webhook
+      # WEBHOOK_URL is auto-detected from Render's RENDER_EXTERNAL_URL env var.
+      # Optional: add Firebase fallbacks (one per line -> Label | https://url.firebaseio.com)
+      # - key: FIREBASES
+      #   value: |
+      #     Phone1 | https://app1.firebaseio.com
