@@ -379,11 +379,17 @@ def user_name(uid: int, d: dict) -> str:
     return str(uid)
 
 def fmt_device_count(count: int) -> str:
-    """Format device count: 50+ for >50, 1k for thousands."""
-    if count >= 1000:
-        return f"{count//1000}k+"
-    if count > 50:
+    """Compact device count: 50+, 1.1k, 1.2k, etc."""
+    count = max(0, int(count))
+    if count > 50 and count < 1000:
         return "50+"
+    if count >= 1000:
+        # Truncate, rather than round, so 1,050 displays as 1k and
+        # 1,100 displays as 1.1k.
+        tenths = count // 100
+        whole, remainder = divmod(tenths, 10)
+        formatted = str(whole) if remainder == 0 else f"{whole}.{remainder}"
+        return f"{formatted}k"
     return str(count)
 
 def fmt_duration(seconds: int) -> str:
@@ -452,9 +458,9 @@ def get_scan_status() -> str:
     device_count = len(CACHED_DEVICES)
     time_diff = time.time() - LAST_SCAN_TIME
     if time_diff < 60:
-        return f"{device_count} devices"
+        return f"{fmt_device_count(device_count)} devices"
     else:
-        return f"{device_count} devices ({int(time_diff/60)}m old)"
+        return f"{fmt_device_count(device_count)} devices ({int(time_diff/60)}m old)"
 
 def log_activity(d: dict, action: str, uid: int, details: str = ""):
     d.setdefault("activity_log", []).append({
@@ -2386,7 +2392,7 @@ async def owner_stats_cb(cq: CallbackQuery, state: FSMContext):
     if not devices:
         devices = await get_all_online_devices(d)
     stats_text = api_stats_text(d)
-    dev_lines = [f"\n📱 <b>Online Devices ({len(devices)})</b>\n"]
+    dev_lines = [f"\n📱 <b>Online Devices ({fmt_device_count(len(devices))})</b>\n"]
     if not devices:
         dev_lines.append("  ❌ No device online")
     for dv in devices:
@@ -2661,7 +2667,7 @@ async def admin_stats_cb(cq: CallbackQuery, state: FSMContext):
     if not devices:
         devices = await get_all_online_devices(d)
     stats_text = api_stats_text(d)
-    dev_lines = [f"\n📱 <b>Online Devices ({len(devices)})</b>\n"]
+    dev_lines = [f"\n📱 <b>Online Devices ({fmt_device_count(len(devices))})</b>\n"]
     if not devices:
         dev_lines.append("  ❌ No device online")
     for dv in devices:
@@ -3119,7 +3125,7 @@ async def owner_credits_add_amount(msg: Message, state: FSMContext):
     save(d)
     await state.clear()
     try:
-        await msg.bot.send_message(uid, f"💰 <b>Credits Added!</b>\n\n+{amount} credits!\nBalance: {get_user_credits(uid, d)}", parse_mode="HTML", message_effect_id=EFFECT_PARTY)
+        await msg.bot.send_message(uid, f"💰 <b>Credits Added!</b>\n\n+{amount} credits!\nBalance: {get_user_credits(uid, d)}\n\nAdded by the owner.", parse_mode="HTML", message_effect_id=EFFECT_PARTY)
     except:
         pass
     await msg.answer(f"✅ {amount} credits added to <code>{uid}</code>!", reply_markup=make_kb([[premium_btn("Back", "owner:home", "back", "secondary")]]), parse_mode="HTML")
@@ -3207,7 +3213,7 @@ async def owner_add_all_credits_done(msg: Message, state: FSMContext):
         add_credits(int(uid_str), amount, d)
         count += 1
     save(d)
-    notification = f"💰 <b>Credits Added!</b>\n\nYou received {amount} credits!"
+    notification = f"💰 <b>Credits Added!</b>\n\nYou received {amount} credits!\n\nAdded by the owner of this bot."
     success = 0
     for uid_str in users:
         try:
