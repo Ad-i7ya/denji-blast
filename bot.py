@@ -23,7 +23,7 @@ from aiogram.types import (
     FSInputFile,
     BufferedInputFile,
     MessageEntity,
-    BotCommand, BotCommandScopeDefault
+    BotCommand, BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeChat
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -49,8 +49,8 @@ PREMIUM_CONTACT = "@te4m1ord"     # contact for premium/payment
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 _DATA_FILE = os.getenv("DATA_FILE", "blast_data.json")
 _VERSION = "v5.0-RICH-DENJI"
-_PROGRESS_UPDATE_INTERVAL = 0.15
-_BACKGROUND_SCAN_INTERVAL = 60.0
+_PROGRESS_UPDATE_INTERVAL = 0.5
+_BACKGROUND_SCAN_INTERVAL = 180.0
 
 # ========== PREMIUM MESSAGE EFFECTS ==========
 # Telegram Bot API documented example effect ID (party popper 🎉).
@@ -86,24 +86,19 @@ def premium_btn(text: str, callback: str, emoji_key: str = None, style: str = "s
     return InlineKeyboardButton(
         text=label,
         callback_data=callback,
-        icon_custom_emoji_id=None,
-        style=style_map.get(style)
+        **({"style": style_map[style]} if style_map.get(style) is not None else {})
     )
 
 def normal_btn(text: str, callback: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text=text,
         callback_data=callback,
-        icon_custom_emoji_id=None,
-        style=None
     )
 
 def url_btn(text: str, url: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text=text,
         url=url,
-        icon_custom_emoji_id=None,
-        style=None
     )
 
 def make_kb(rows: list) -> InlineKeyboardMarkup:
@@ -1023,8 +1018,9 @@ def get_cached_devices() -> list:
 async def fb_get(base_url: str, path: str) -> dict:
     url = base_url.rstrip("/") + path
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.get(url) as r:
                 if r.status == 200:
                     txt = (await r.text()).strip()
                     if txt == "null" or not txt:
@@ -1354,17 +1350,34 @@ R = Router()
 
 # ========== BOT COMMANDS MENU ==========
 async def set_bot_commands(bot: Bot):
-    commands = [
+    """Install role-specific command menus; never expose privileged commands globally."""
+    user_commands = [
         BotCommand(command="start", description="🏠 Start the bot"),
-        BotCommand(command="help", description="❓ Help & info"),
-        BotCommand(command="commands", description="📋 All commands"),
-        BotCommand(command="source", description="📦 Get bot source (Owner only)"),
-        BotCommand(command="broadcast", description="📢 Broadcast message (Admin)"),
-        BotCommand(command="panel", description="👑 Owner panel (Owner only)"),
+        BotCommand(command="help", description="❓ Help and info"),
+    ]
+    admin_commands = user_commands + [
+        BotCommand(command="broadcast", description="📢 Broadcast message"),
+        BotCommand(command="panel", description="🛡️ Admin panel"),
+    ]
+    owner_commands = admin_commands + [
+        BotCommand(command="source", description="📦 Get bot source"),
+        BotCommand(command="commands", description="📋 Command list"),
     ]
     try:
-        await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-        log.info("Bot commands menu set")
+        # Clear any stale default menu first, then set the safe private-user menu.
+        await bot.delete_my_commands(scope=BotCommandScopeDefault())
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
+        # Per-chat scopes override the regular-user menu for privileged accounts.
+        for owner_id in set(SUPER_ADMINS + [MAIN_OWNER]):
+            await bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=owner_id))
+        d = load()
+        for admin_id in d.get("admins", []):
+            if admin_id not in SUPER_ADMINS and admin_id != MAIN_OWNER:
+                await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+        for owner_id in d.get("owners", []):
+            if owner_id not in SUPER_ADMINS and owner_id != MAIN_OWNER:
+                await bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=owner_id))
+        log.info("Role-specific bot command menus set")
     except Exception as e:
         log.warning(f"Failed to set commands: {e}")
 
@@ -3405,23 +3418,13 @@ async def owner_fj_add_start(cq: CallbackQuery, state: FSMContext):
     if not is_owner(cq.from_user.id, d):
         await cq.answer("🔒 Owner only!", show_alert=True)
         return
-    await state.set_state(S.fj_add_channel)
-    await cq.message.edit_text("🔗 <b>Add Channel</b>\n\nStep 1/2: Channel ID (e.g. -1001234567890):", reply_markup=make_kb([[premium_btn("Cancel", "owner:fj:menu", "cross", "danger")]]), parse_mode="HTML")
-
-@R.message(S.fj_add_channel)
-async def owner_fj_add_channel(msg: Message, state: FSMContext):
-    d = load()
-    if not is_owner(msg.from_user.id, d):
-        await state.clear()
-        return
-    try:
-        ch_id = int(msg.text.strip())
-    except:
-        await msg.answer("❓ Send a valid channel ID.", parse_mode="HTML")
-        return
-    await state.update_data(fj_channel_id=ch_id)
     await state.set_state(S.fj_add_link)
-    await msg.answer("Step 2/2: Invite link:", reply_markup=make_kb([[premium_btn("Cancel", "owner:fj:menu", "cross", "danger")]]), parse_mode="HTML")
+    await cq.message.edit_text(
+        "🔗 <b>Add Force-Join Channel</b>\n\n"
+        "Send a <b>t.me link</b> or <b>@username</b> to add (e.g. <code>t.me/myChannel</code> or <code>@username</code>):",
+        reply_markup=make_kb([[premium_btn("Cancel", "owner:fj:menu", "cross", "danger")]]),
+        parse_mode="HTML"
+    )
 
 @R.message(S.fj_add_link)
 async def owner_fj_add_link(msg: Message, state: FSMContext):
@@ -3429,17 +3432,21 @@ async def owner_fj_add_link(msg: Message, state: FSMContext):
     if not is_owner(msg.from_user.id, d):
         await state.clear()
         return
-    link = msg.text.strip()
-    if not link.startswith("http"):
-        await msg.answer("❓ Send a valid link.", parse_mode="HTML")
-        return
-    fsmd = await state.get_data()
-    ch_id = str(fsmd.get("fj_channel_id"))
+    raw = msg.text.strip()
+    # Resolve channel ID from t.me link or @username
+    link = raw
     try:
-        chat = await msg.bot.get_chat(int(ch_id))
-        title = chat.title or "Channel"
-    except:
-        title = "Channel"
+        if not link.startswith("http"):
+            if link.startswith("t.me/"):
+                link = "https://" + link
+            else:
+                link = "https://" + link if link.startswith("t.me") else "https://t.me/" + link.lstrip("@")
+        chat_info = await msg.bot.get_chat(raw)
+        ch_id = str(chat_info.id)
+        title = chat_info.title or "Channel"
+    except Exception:
+        await msg.answer("❌ Could not resolve that channel. Make sure the bot is an admin in the channel and try again with a valid t.me link or @username.", parse_mode="HTML")
+        return
     channels = d.setdefault("force_join", {}).setdefault("channels", [])
     channels = [c for c in channels if str(c["id"]) != ch_id]
     channels.append({"id": ch_id, "link": link, "title": title, "required": True})

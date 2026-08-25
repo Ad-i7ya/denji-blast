@@ -24,7 +24,7 @@ _client = None
 _collection = None
 _last_error: str | None = None
 _last_attempt = 0.0
-_RETRY_AFTER = 15.0
+_RETRY_AFTER = 2.0
 
 
 def _mongo():
@@ -47,7 +47,16 @@ def _mongo():
         return None
     try:
         from pymongo import MongoClient
-        _client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000, socketTimeoutMS=10000, retryWrites=True)
+        _client = MongoClient(
+            MONGODB_URI,
+            serverSelectionTimeoutMS=3000,
+            connectTimeoutMS=3000,
+            socketTimeoutMS=5000,
+            retryWrites=True,
+            maxPoolSize=30,
+            minPoolSize=1,
+            appname="denji-blast",
+        )
         _client.admin.command("ping")
         _collection = _client[MONGODB_DB]["bot_state"]
         _last_error = None
@@ -138,7 +147,10 @@ def load() -> dict[str, Any]:
     try:
         document = collection.find_one({"_id": "state"})
         if not document:
-            return _migrate_legacy(collection)
+            migrated = _migrate_legacy(collection)
+            if migrated:
+                return migrated
+            raise RuntimeError("MongoDB state is missing; refusing to create a blank production database")
         for key in ("_id", "updated_at", "version"):
             document.pop(key, None)
         return document
