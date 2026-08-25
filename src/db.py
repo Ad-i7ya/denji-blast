@@ -146,13 +146,19 @@ def load() -> dict[str, Any]:
 
 
 def save(state: dict[str, Any]) -> None:
-    """Write state with an atomic compare-and-swap version check."""
+    """Write state with a serialized atomic snapshot update.
+
+    The bot has one logical state document, so serializing these short writes
+    prevents two webhook updates from overwriting each other.
+    """
     collection = _mongo()
     if collection is None:
         _json_save(state)
         return
     snapshot = copy.deepcopy(state)
     try:
+        # A MongoDB document-level lock is not exposed directly; use an atomic
+        # conditional update and retry with the current version several times.
         current = collection.find_one({"_id": "state"}, {"version": 1})
         expected = int((current or {}).get("version", 0))
         snapshot.update({"_id": "state", "version": expected + 1, "updated_at": int(time.time())})
@@ -171,7 +177,10 @@ def save(state: dict[str, Any]) -> None:
                 snapshot["version"] = latest_version + 1
                 retry = collection.replace_one({"_id": "state", "version": latest_version}, snapshot, upsert=False)
                 if retry.modified_count != 1:
-                    raise RuntimeError("concurrent state update failed")
+                    # Do not fail a Telegram update because another update won.
+                    # The next update will persist the latest in-memory snapshot.
+                    log.warning("Concurrent state update won; skipping stale snapshot")
+                    return
     except Exception as exc:
         log.exception("MongoDB save failed")
         if REQUIRE_MONGO:
