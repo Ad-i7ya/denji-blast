@@ -18,7 +18,7 @@ import db
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
     Message, CallbackQuery,
-    ReplyKeyboardMarkup, KeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, CopyTextButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
     FSInputFile,
     BufferedInputFile,
@@ -797,6 +797,7 @@ def user_kb() -> InlineKeyboardMarkup:
         [premium_btn("Buy Credits", "user:pricing", "plan", "success")],
         [premium_btn("Transfer Credits", "user:transfer", "money", "success")],
         [premium_btn("Info", "user:info", "info", "primary")],
+        [premium_btn("Copy Chat ID", "user:myid", "info", "secondary")],
     ]
     return make_kb(rows)
 
@@ -879,16 +880,16 @@ def user_home_text(uid: int, d: dict) -> str:
     if tpl_count:
         extra += f"📋 Templates : <b>{tpl_count}</b>\n"
     return (
-        f"⚡ <b>DENJI BLAST {_VERSION}</b>\n"
+        f"<blockquote>⚡ <b>DENJI BLAST {_VERSION}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 Role    : <b>{role_tag(uid, d)}</b>\n"
         f"💰 Credits : <b>{credits}</b>\n"
         f"📨 Uses    : <b>{udata.get('uses', 0)}</b>\n"
-        f"🔥 APIs    : <b>{len(fbs)} firebase(s)</b>\n"
+        f"🔥 APIs    : <b>{len(fbs)} Firebase(s)</b>\n"
         f"📱 Devices : <b>{scan_info}</b>\n"
         f"{extra}"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Tap <b>Send SMS</b> to start"
+        f"Tap <b>📨 Send SMS</b> to start</blockquote>"
     )
 
 def role_tag(uid: int, d: dict) -> str:
@@ -2795,10 +2796,26 @@ async def user_pricing(cq: CallbackQuery, state: FSMContext):
     await cq.message.edit_text(text, reply_markup=make_kb(rows), parse_mode="HTML")
 
 # ========== USER INFO ==========
+@R.callback_query(F.data == "user:myid")
+async def user_myid(cq: CallbackQuery, state: FSMContext):
+    await state.clear()
+    uid = cq.from_user.id
+    copy_markup = make_kb([
+        [InlineKeyboardButton(text="📋 Copy Chat ID", copy_text=CopyTextButton(text=str(uid)))],
+        [premium_btn("Back to Dashboard", "user:home", "home", "primary")],
+    ])
+    text = f"<blockquote>🆔 <b>Your Chat ID</b>\n\n<code>{uid}</code>\n\nUse the copy button to share it with the owner/admin.</blockquote>"
+    try:
+        await cq.message.edit_text(text, reply_markup=copy_markup, parse_mode="HTML")
+    except TelegramBadRequest:
+        # Older Telegram clients/API proxies may reject copy_text; keep a safe fallback.
+        await cq.message.edit_text(text, reply_markup=make_kb([[premium_btn("Back to Dashboard", "user:home", "home", "primary")]]), parse_mode="HTML")
+    await cq.answer()
+
 @R.callback_query(F.data == "user:info")
 async def user_info(cq: CallbackQuery, state: FSMContext):
     await cq.message.edit_text(
-        f"⚡ <b>DENJI BLAST {_VERSION}</b>\n\nBot for sending bulk SMS via Firebase.\n\n👑 Developer: <a href='{SUPER_ADMIN_LINK}'>{SUPER_ADMIN_NAME}</a>\n\nCredits are required to use the bot.",
+        f"<blockquote>⚡ <b>DENJI BLAST {_VERSION}</b>\n\nBot for sending SMS through Firebase-connected devices.\n\n👑 Developer: <a href='{SUPER_ADMIN_LINK}'>{SUPER_ADMIN_NAME}</a>\n💎 Premium: {PREMIUM_CONTACT}\n\nCredits are required to use the bot.</blockquote>",
         reply_markup=make_kb([[premium_btn("Back", "user:home", "back", "secondary")]]),
         parse_mode="HTML",
         disable_web_page_preview=True
