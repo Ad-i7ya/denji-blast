@@ -11,6 +11,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -177,6 +178,8 @@ def save(state: dict[str, Any]) -> None:
                     return
         # Keep the last successful snapshot outside the active document.
         backup = copy.deepcopy(snapshot)
+        # Backups must have their own IDs; the active state ID is reserved.
+        backup["_id"] = str(uuid.uuid4())
         backup["backup_at"] = int(time.time())
         collection.database["bot_state_backups"].insert_one(backup)
         # Retain a bounded backup history.
