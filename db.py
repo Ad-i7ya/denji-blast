@@ -1,8 +1,7 @@
 """Authoritative durable storage for the bot.
 
-Production rule: when MONGODB_URI is configured, MongoDB is mandatory. The
-Render filesystem is never used as a silent fallback, so a database outage
-stops the process instead of pretending to save data that will vanish.
+MongoDB is mandatory in production. State is never silently replaced by an
+empty default document, and every successful write keeps a backup snapshot.
 """
 from __future__ import annotations
 
@@ -24,7 +23,7 @@ _client = None
 _collection = None
 _last_error: str | None = None
 _last_attempt = 0.0
-_RETRY_AFTER = 30.0
+_RETRY_AFTER = 15.0
 
 
 def _mongo():
@@ -37,7 +36,7 @@ def _mongo():
             _collection = None
     if _last_attempt and time.time() - _last_attempt < _RETRY_AFTER:
         if REQUIRE_MONGO:
-            raise RuntimeError(f"MongoDB temporarily unavailable: {_last_error or 'connection retry pending'}")
+            raise RuntimeError(f"MongoDB temporarily unavailable: {_last_error or 'retry pending'}")
         return None
     _last_attempt = time.time()
     if not MONGODB_URI:
@@ -47,21 +46,15 @@ def _mongo():
         return None
     try:
         from pymongo import MongoClient
-        _client = MongoClient(
-            MONGODB_URI,
-            serverSelectionTimeoutMS=8000,
-            connectTimeoutMS=8000,
-            socketTimeoutMS=15000,
-            retryWrites=True,
-        )
+        _client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000, socketTimeoutMS=10000, retryWrites=True)
         _client.admin.command("ping")
         _collection = _client[MONGODB_DB]["bot_state"]
         _last_error = None
-        log.info("MongoDB connected: database=%s collection=bot_state", MONGODB_DB)
+        log.info("MongoDB connected: database=%s", MONGODB_DB)
         return _collection
     except Exception as exc:
         _last_error = str(exc)
-        log.exception("MongoDB connection failed")
+        log.error("MongoDB connection failed: %s", exc)
         if REQUIRE_MONGO:
             raise RuntimeError(f"MongoDB is required but unavailable: {exc}") from exc
         return None
@@ -73,8 +66,8 @@ def health() -> dict[str, Any]:
         if collection is None:
             return {"connected": False, "required": REQUIRE_MONGO, "error": _last_error}
         collection.database.client.admin.command("ping")
-        doc = collection.find_one({"_id": "state"}, {"version": 1, "updated_at": 1}) or {}
-        return {"connected": True, "required": REQUIRE_MONGO, "version": doc.get("version", 0), "updated_at": doc.get("updated_at")}
+        doc = collection.find_one({"_id": "state"}, {"version": 1, "updated_at": 1, "users": 1, "firebases": 1, "redeem_codes": 1}) or {}
+        return {"connected": True, "required": REQUIRE_MONGO, "version": doc.get("version", 0), "updated_at": doc.get("updated_at"), "users": len(doc.get("users", {})), "firebases": len(doc.get("firebases", [])), "redeem_codes": len(doc.get("redeem_codes", {}))}
     except Exception as exc:
         return {"connected": False, "required": REQUIRE_MONGO, "error": str(exc)}
 
@@ -90,9 +83,9 @@ def _json_load() -> dict[str, Any]:
         backup = DATA_FILE.with_name(DATA_FILE.name + f".corrupt.{int(time.time())}")
         try:
             DATA_FILE.replace(backup)
-            log.error("Corrupt local state backed up to %s: %s", backup, exc)
         except Exception:
-            log.exception("Could not back up corrupt local state")
+            pass
+        log.error("Corrupt local state: %s", exc)
         return {}
 
 
@@ -110,9 +103,18 @@ def _json_save(state: dict[str, Any]) -> None:
             os.unlink(temp_name)
 
 
+def _safe_state(state: dict[str, Any]) -> bool:
+    """Reject snapshots that would erase known production data."""
+    if not isinstance(state, dict):
+        return False
+    if not any(key in state for key in ("users", "firebases", "redeem_codes", "admins", "owners", "settings")):
+        return False
+    return True
+
+
 def _migrate_legacy(collection) -> dict[str, Any]:
     legacy = _json_load()
-    if not legacy:
+    if not legacy or not _safe_state(legacy):
         return {}
     snapshot = copy.deepcopy(legacy)
     snapshot.update({"_id": "state", "version": 1, "updated_at": int(time.time())})
@@ -139,50 +141,49 @@ def load() -> dict[str, Any]:
             document.pop(key, None)
         return document
     except Exception as exc:
-        log.exception("MongoDB load failed")
+        log.error("MongoDB load failed: %s", exc)
         if REQUIRE_MONGO:
             raise RuntimeError(f"MongoDB load failed: {exc}") from exc
         return _json_load()
 
 
 def save(state: dict[str, Any]) -> None:
-    """Write state with a serialized atomic snapshot update.
-
-    The bot has one logical state document, so serializing these short writes
-    prevents two webhook updates from overwriting each other.
-    """
+    """Save complete state without allowing empty snapshots to erase data."""
+    if not _safe_state(state):
+        raise RuntimeError("Refusing to persist invalid or empty state")
     collection = _mongo()
     if collection is None:
         _json_save(state)
         return
     snapshot = copy.deepcopy(state)
     try:
-        # A MongoDB document-level lock is not exposed directly; use an atomic
-        # conditional update and retry with the current version several times.
         current = collection.find_one({"_id": "state"}, {"version": 1})
         expected = int((current or {}).get("version", 0))
         snapshot.update({"_id": "state", "version": expected + 1, "updated_at": int(time.time())})
         if current is None:
             result = collection.update_one({"_id": {"$exists": False}}, {"$setOnInsert": snapshot}, upsert=True)
-            # If another writer inserted first, do not overwrite it.
             if result.upserted_id is None:
                 raise RuntimeError("concurrent initialization rejected")
         else:
             result = collection.replace_one({"_id": "state", "version": expected}, snapshot, upsert=False)
             if result.modified_count != 1:
-                # A concurrent whole-state writer won. Retry from its latest
-                # version rather than turning the Telegram update into HTTP 500.
                 latest = collection.find_one({"_id": "state"}, {"version": 1}) or {}
                 latest_version = int(latest.get("version", expected))
                 snapshot["version"] = latest_version + 1
                 retry = collection.replace_one({"_id": "state", "version": latest_version}, snapshot, upsert=False)
                 if retry.modified_count != 1:
-                    # Do not fail a Telegram update because another update won.
-                    # The next update will persist the latest in-memory snapshot.
-                    log.warning("Concurrent state update won; skipping stale snapshot")
+                    log.warning("Concurrent state update won; preserving the newer MongoDB state")
                     return
+        # Keep the last successful snapshot outside the active document.
+        backup = copy.deepcopy(snapshot)
+        backup["backup_at"] = int(time.time())
+        collection.database["bot_state_backups"].insert_one(backup)
+        # Retain a bounded backup history.
+        old = list(collection.database["bot_state_backups"].find({}, {"_id": 1}).sort("backup_at", -1).skip(20))
+        if old:
+            collection.database["bot_state_backups"].delete_many({"_id": {"$in": [x["_id"] for x in old]}})
     except Exception as exc:
-        log.exception("MongoDB save failed")
+        log.error("MongoDB save failed: %s", exc)
         if REQUIRE_MONGO:
             raise RuntimeError(f"MongoDB save failed: {exc}") from exc
         _json_save(state)
