@@ -45,7 +45,7 @@ SUPER_ADMIN_LINK = f"tg://user?id={MAIN_OWNER}"
 SUPER_ADMINS = [8310937786]
 PREMIUM_CONTACT = "@te4m1ord"     # contact for premium/payment
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8850591358:AAHhGcM1uzvD1vYH58GS1xOBxm5dclf24WE")
 _DATA_FILE = os.getenv("DATA_FILE", "blast_data.json")
 _VERSION = "v6.0-VPS-JSON"
 _PROGRESS_UPDATE_INTERVAL = 0.5
@@ -262,6 +262,14 @@ def load() -> dict:
             data.setdefault("premium", {}).setdefault(k, v)
         if MAIN_OWNER not in data.get("owners", []):
             data.setdefault("owners", []).insert(0, MAIN_OWNER)
+    # Normalize every firebase so it always carries an id, label, and url.
+    for fb in data.get("firebases", []):
+        if not isinstance(fb, dict) or not fb.get("url"):
+            continue
+        if not fb.get("id"):
+            fb["id"] = str(int(time.time() * 1000)) + str(random.randint(100, 999))
+        fb.setdefault("label", fb["url"].replace("https://", "").split(".")[0][:20])
+        fb.setdefault("added_at", int(time.time()))
     _load_firebases_from_env(data)
     return data
 
@@ -955,7 +963,7 @@ def trend_stats_text(d: dict) -> str:
 # ========== BACKGROUND SCANNER ==========
 async def background_firebase_scanner(bot: Bot):
     global CACHED_DEVICES, LAST_SCAN_TIME, SCANNING_IN_PROGRESS, SCAN_STATUS
-    log.info("Background Firebase Scanner STARTED - scans every 1 minute")
+    log.info("Background Firebase Scanner STARTED - scans every 3 minutes")
 
     while True:
         async with SCAN_LOCK:
@@ -985,8 +993,11 @@ async def background_firebase_scanner(bot: Bot):
             CACHED_DEVICES = devices
 
             for fb in fbs:
-                fb_id = fb["id"]
-                fb_label = fb.get("label", fb["url"][:30])
+                # Tolerate legacy firebases that lack an id by deriving one.
+                fb_id = fb.get("id") or str(hash(fb.get("url", "")))
+                if "id" not in fb:
+                    fb["id"] = fb_id
+                fb_label = fb.get("label", (fb.get("url") or "")[:30])
                 fb_online = sum(1 for dv in devices if dv["fb_id"] == fb_id)
                 FB_DEVICE_COUNTS[fb_id] = {
                     "label": fb_label,
