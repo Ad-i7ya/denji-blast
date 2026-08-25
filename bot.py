@@ -48,7 +48,7 @@ PREMIUM_CONTACT = "@te4m1ord"     # contact for premium/payment
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 _DATA_FILE = os.getenv("DATA_FILE", "blast_data.json")
-_VERSION = "v5.0-RICH-DENJI"
+_VERSION = "v5.1-FINAL-STABLE"
 _PROGRESS_UPDATE_INTERVAL = 0.5
 _BACKGROUND_SCAN_INTERVAL = 180.0
 
