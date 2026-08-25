@@ -573,7 +573,7 @@ def force_join_kb(missing: list) -> InlineKeyboardMarkup:
 # ========== KEYBOARD BUILDERS ==========
 
 def owner_kb(d: dict) -> InlineKeyboardMarkup:
-    mode_text = "Disable Free Mode" if d.get("free_mode") else "Enable Free Mode"
+    mode_text = "✅ Disable Free Mode" if d.get("free_mode") else "🔒 Enable Free Mode"
     mode_cb = "owner:free:off" if d.get("free_mode") else "owner:free:on"
 
     transfer_enabled = d.get("settings", {}).get("transfer_enabled", True)
@@ -833,6 +833,7 @@ def owner_panel_text(d: dict) -> str:
         f"❌ Total Failed   : <b>{stats.get('total_failed', 0)}</b>\n"
         f"⚡ Active Sends   : <b>{active_sessions}</b>\n"
         f"🔐 Access Mode    : <b>{mode}</b>\n"
+        f"💾 Storage        : <b>MongoDB</b>\n"
         f"📢 Force Join     : <b>{fj_status}</b>\n"
         f"💸 Transfer       : <b>{transfer_status}</b>\n"
         f"✖️ Multiplier     : <b>{multiplier}x</b>\n"
@@ -2543,9 +2544,12 @@ async def owner_free_toggle(cq: CallbackQuery, state: FSMContext):
         await cq.answer("🔒 Owner only!", show_alert=True)
         return
     d["free_mode"] = (cq.data == "owner:free:on")
+    # Persist and re-read to guarantee the button reflects MongoDB's value.
     save(d)
-    await cq.answer(f"Done! {'FREE MODE ON' if d['free_mode'] else 'Approval Required'}", show_alert=True)
-    await owner_home(cq, state)
+    verified = load()
+    status = "FREE MODE ON" if verified.get("free_mode") else "APPROVAL REQUIRED"
+    await cq.answer(f"✅ {status}", show_alert=True)
+    await cq.message.edit_text(owner_panel_text(verified), reply_markup=owner_kb(verified), parse_mode="HTML")
 
 # ========== USERS LIST ==========
 @R.callback_query(F.data.in_({"owner:users:list", "admin:users:list"}))
