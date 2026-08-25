@@ -1037,7 +1037,7 @@ async def fb_put(base_url: str, path: str, payload: dict) -> bool:
     for attempt in range(3):
         try:
             async with aiohttp.ClientSession() as s:
-                async with s.put(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                async with s.put(url, json=payload, timeout=aiohttp.ClientTimeout(total=6)) as r:
                     body = await r.text()
                     if 200 <= r.status < 300:
                         try:
@@ -1079,7 +1079,7 @@ async def get_all_online_devices(d: dict) -> list:
         shallow_url = fb["url"].rstrip("/") + "/clients.json?shallow=true"
         try:
             async with aiohttp.ClientSession() as s:
-                async with s.get(shallow_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                async with s.get(shallow_url, timeout=aiohttp.ClientTimeout(total=6)) as r:
                     if r.status != 200:
                         return
                     txt = (await r.text()).strip()
