@@ -14,6 +14,7 @@
 import asyncio, json, os, time, logging, random, string
 from datetime import datetime, timedelta
 import aiohttp
+import db
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
     Message, CallbackQuery,
@@ -239,7 +240,13 @@ def _load_firebases_from_env(d: dict):
         log.info(f"✅ Loaded {len(fbs)} firebases from FIREBASES env var")
 
 def load() -> dict:
-    if os.path.exists(_DATA_FILE):
+    """Load all state from MongoDB, retaining the existing schema/defaults."""
+    remote = db.load()
+    if remote:
+        data = remote
+    elif os.getenv("MONGODB_URI", "").strip():
+        data = {}
+    elif os.path.exists(_DATA_FILE):
         try:
             with open(_DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -265,18 +272,23 @@ def load() -> dict:
     return d
 
 def save(d: dict):
-    with open(_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(d, f, indent=2, ensure_ascii=False)
+    """Persist the complete bot state in MongoDB; use atomic JSON only locally."""
+    db.save(d)
 
-def reg_user(uid: int, name: str, d: dict):
+def reg_user(uid: int, name: str, d: dict, username: str = ""):
     k = str(uid)
     if k not in d["users"]:
         d["users"][k] = {
-            "name": name, "uses": 0, "credits": 0,
+            "name": name, "username": username or "", "uses": 0, "credits": 0,
             "joined_at": int(time.time()),
             "refer_code": None, "referred_by": None,
-            "sms_history": []
+            "sms_history": [], "device_limit": 0
         }
+    else:
+        d["users"][k]["name"] = name
+        if username:
+            d["users"][k]["username"] = username
+        d["users"][k].setdefault("device_limit", 0)
 
 def is_main_owner(uid: int) -> bool:
     return uid == MAIN_OWNER
@@ -477,11 +489,25 @@ def progress_text(sent: int, failed: int, total: int, credits: int = None, speed
 
 # ========== FORCE JOIN FUNCTIONS ==========
 async def check_membership(bot: Bot, uid: int, channel_id: str) -> bool:
-    try:
-        member = await bot.get_chat_member(int(channel_id), uid)
-        return member.status in ("member", "administrator", "creator")
-    except Exception:
-        return False
+    """Check membership for @username, t.me links, or numeric channel IDs."""
+    value = str(channel_id).strip()
+    if "t.me/" in value:
+        value = value.split("t.me/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+        if not value.startswith("@"):
+            value = "@" + value
+    attempts = [value]
+    if value.startswith("@"):
+        attempts.append(value[1:])
+    elif value.lstrip("-").isdigit():
+        attempts.append(int(value))
+    for chat in attempts:
+        try:
+            member = await bot.get_chat_member(chat, uid)
+            if member.status in ("member", "administrator", "creator"):
+                return True
+        except Exception:
+            continue
+    return False
 
 async def user_joined_all(bot: Bot, uid: int, d: dict) -> tuple[bool, list]:
     fj = d.get("force_join", {})
@@ -1210,7 +1236,7 @@ async def run_sms_blast_with_progress(bot: Bot, msg: Message, uid: int, number: 
                         api_usage_delta[fb_id]["sent" if ok else "failed"] += 1
                         now = time.time()
                         if actual_total > 0:
-                            fake_sent = int((sent_ok / actual_total) * count)
+                            fake_sent = sent_ok
                             fake_sent = min(fake_sent, count)
                         else:
                             fake_sent = 0
@@ -1278,7 +1304,7 @@ async def run_sms_blast_with_progress(bot: Bot, msg: Message, uid: int, number: 
     if sent_ok >= actual_total:
         display_sent = count
     else:
-        display_sent = int((sent_ok / actual_total) * count) if actual_total > 0 else 0
+        display_sent = sent_ok
         display_sent = min(display_sent, count)
 
     icon = "✅" if sent_fail == 0 and sent_ok > 0 else "⚠️" if sent_ok > 0 else "❌"

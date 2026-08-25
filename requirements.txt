@@ -1,2 +1,4 @@
 aiogram>=3.4
 aiohttp>=3.9
+pymongo>=4.8
+dnspython>=2.6
