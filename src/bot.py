@@ -14,7 +14,6 @@
 import asyncio, json, os, time, logging, random, string
 from datetime import datetime, timedelta
 import aiohttp
-import db
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
     Message, CallbackQuery,
@@ -48,7 +47,7 @@ PREMIUM_CONTACT = "@te4m1ord"     # contact for premium/payment
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 _DATA_FILE = os.getenv("DATA_FILE", "blast_data.json")
-_VERSION = "v5.1-FINAL-STABLE"
+_VERSION = "v6.0-VPS-JSON"
 _PROGRESS_UPDATE_INTERVAL = 0.5
 _BACKGROUND_SCAN_INTERVAL = 180.0
 
@@ -235,41 +234,46 @@ def _load_firebases_from_env(d: dict):
         log.info(f"✅ Loaded {len(fbs)} firebases from FIREBASES env var")
 
 def load() -> dict:
-    """Load all state from MongoDB, retaining the existing schema/defaults."""
-    remote = db.load()
-    if remote and all(key in remote for key in ("users", "firebases", "redeem_codes", "admins", "owners", "settings", "stats", "force_join")):
-        data = remote
-    elif os.getenv("MONGODB_URI", "").strip():
-        # Do not initialize defaults over a partial remote document.
-        raise RuntimeError("MongoDB state is incomplete; refusing to overwrite it")
-    elif os.path.exists(_DATA_FILE):
+    """Load bot state from the local JSON file, merging any new default keys."""
+    data = None
+    if os.path.exists(_DATA_FILE):
         try:
             with open(_DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            default = _default_data()
-            for k, v in default.items():
-                if k not in data:
-                    data[k] = v
-            if MAIN_OWNER not in data.get("owners", []):
-                data["owners"].insert(0, MAIN_OWNER)
-            if "transfer_enabled" not in data.get("settings", {}):
-                data.setdefault("settings", {})["transfer_enabled"] = True
-            if "multiplier" not in data.get("settings", {}):
-                data.setdefault("settings", {})["multiplier"] = 3
-            if "daily_limit" not in data.get("settings", {}):
-                data.setdefault("settings", {})["daily_limit"] = 0
-            _load_firebases_from_env(data)
-            return data
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
         except Exception as e:
-            log.error(f"Load error: {e}")
-    d = _default_data()
-    _load_firebases_from_env(d)
-    save(d)
-    return d
+            log.error(f"Load error: {e}; preserving corrupt file")
+            try:
+                os.replace(_DATA_FILE, _DATA_FILE + f".corrupt.{int(time.time())}")
+            except Exception:
+                pass
+            data = None
+    if data is None:
+        data = _default_data()
+    else:
+        default = _default_data()
+        for k, v in default.items():
+            if k not in data:
+                data[k] = v
+        for k, v in default.get("settings", {}).items():
+            data.setdefault("settings", {}).setdefault(k, v)
+        for k, v in default.get("premium", {}).items():
+            data.setdefault("premium", {}).setdefault(k, v)
+        if MAIN_OWNER not in data.get("owners", []):
+            data.setdefault("owners", []).insert(0, MAIN_OWNER)
+    _load_firebases_from_env(data)
+    return data
 
 def save(d: dict):
-    """Persist the complete bot state in MongoDB; use atomic JSON only locally."""
-    db.save(d)
+    """Persist bot state atomically to the local JSON file (VPS-friendly)."""
+    tmp = _DATA_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _DATA_FILE)
+    except Exception as e:
+        log.error(f"Save error: {e}")
 
 def reg_user(uid: int, name: str, d: dict, username: str = ""):
     k = str(uid)
@@ -828,7 +832,7 @@ def owner_panel_text(d: dict) -> str:
         f"❌ Total Failed   : <b>{stats.get('total_failed', 0)}</b>\n"
         f"⚡ Active Sends   : <b>{active_sessions}</b>\n"
         f"🔐 Access Mode    : <b>{mode}</b>\n"
-        f"💾 Storage        : <b>MongoDB</b>\n"
+        f"💾 Storage        : <b>JSON (VPS)</b>\n"
         f"📢 Force Join     : <b>{fj_status}</b>\n"
         f"💸 Transfer       : <b>{transfer_status}</b>\n"
         f"✖️ Multiplier     : <b>{multiplier}x</b>\n"
@@ -1215,6 +1219,7 @@ async def run_sms_blast_with_progress(bot: Bot, msg: Message, uid: int, number: 
             if not routes:
                 routes = [(device, 0) for device in devices]
             route_index = 0
+            base_credits = get_user_credits(uid, d) if is_regular_user else None
             while msgs_left > 0:
                 async with session.lock:
                     if session.cancelled:
@@ -1229,19 +1234,6 @@ async def run_sms_blast_with_progress(bot: Bot, msg: Message, uid: int, number: 
                     if ok:
                         sent_ok += 1
                         msgs_left -= 1
-                        if is_regular_user and sent_ok <= count:
-                            d_temp = load()
-                            deduct_credits(uid, 1, d_temp)
-                            add_daily_used(uid, 1, d_temp)
-                            d_temp["stats"]["total_sent"] = d_temp["stats"].get("total_sent", 0) + 1
-                            k = str(uid)
-                            if k in d_temp["users"]:
-                                d_temp["users"][k]["uses"] = d_temp["users"][k].get("uses", 0) + 1
-                            d_temp.setdefault("sms_history", {}).setdefault(str(uid), []).append({
-                                "number": number, "message": message[:100],
-                                "timestamp": int(time.time()), "status": "sent"
-                            })
-                            save(d_temp)
                     else:
                         sent_fail += 1
                         msgs_left -= 1
@@ -1251,10 +1243,10 @@ async def run_sms_blast_with_progress(bot: Bot, msg: Message, uid: int, number: 
                     now = time.time()
                     progress_sent = min(sent_ok, count)
                     if (now - last_update_time >= _PROGRESS_UPDATE_INTERVAL or msgs_left <= 0 or session.cancelled):
-                        current_credits_live = get_user_credits(uid, load()) if is_regular_user else None
+                        credits_live = (base_credits - sent_ok) if is_regular_user else None
                         try:
                             await progress_msg.edit_text(
-                                progress_text(progress_sent, min(sent_fail, count - progress_sent), count, current_credits_live, speed_label_display),
+                                progress_text(progress_sent, min(sent_fail, count - progress_sent), count, credits_live, speed_label_display),
                                 reply_markup=stop_send_kb() if not session.cancelled else None,
                                 parse_mode="HTML"
                             )
@@ -1278,36 +1270,34 @@ async def run_sms_blast_with_progress(bot: Bot, msg: Message, uid: int, number: 
         if uid in USER_SESSIONS:
             del USER_SESSIONS[uid]
 
-    if not is_regular_user:
-        d_final = load()
-        d_final["stats"]["total_sent"] = d_final["stats"].get("total_sent", 0) + sent_ok
-        d_final["stats"]["total_failed"] = d_final["stats"].get("total_failed", 0) + sent_fail
-        for fb_id, delta in api_usage_delta.items():
-            d_final["stats"].setdefault("api_usage", {}).setdefault(fb_id, {"sent": 0, "failed": 0})
-            d_final["stats"]["api_usage"][fb_id]["sent"] += delta["sent"]
-            d_final["stats"]["api_usage"][fb_id]["failed"] += delta["failed"]
-        k = str(uid)
-        if k in d_final["users"]:
-            d_final["users"][k]["uses"] = d_final["users"][k].get("uses", 0) + sent_ok
-        d_final.setdefault("sms_history", {}).setdefault(str(uid), []).append({
+    # Apply all accumulated results in a single read-modify-write cycle.
+    d_final = load()
+    d_final["stats"]["total_sent"] = d_final["stats"].get("total_sent", 0) + sent_ok
+    d_final["stats"]["total_failed"] = d_final["stats"].get("total_failed", 0) + sent_fail
+    for fb_id, delta in api_usage_delta.items():
+        entry = d_final["stats"].setdefault("api_usage", {}).setdefault(fb_id, {"sent": 0, "failed": 0})
+        entry["sent"] += delta["sent"]
+        entry["failed"] += delta["failed"]
+    k = str(uid)
+    if k in d_final["users"]:
+        d_final["users"][k]["uses"] = d_final["users"][k].get("uses", 0) + sent_ok
+    if is_regular_user and sent_ok > 0:
+        # Deduct credits once for all successfully-sent messages.
+        deduct_credits(uid, sent_ok, d_final)
+        add_daily_used(uid, sent_ok, d_final)
+        d_final.setdefault("sms_history", {}).setdefault(k, []).append({
+            "number": number, "message": message[:100],
+            "timestamp": int(time.time()), "status": "sent"
+        })
+    else:
+        d_final.setdefault("sms_history", {}).setdefault(k, []).append({
             "number": number,
             "message": message[:100],
             "timestamp": int(time.time()),
             "status": "completed" if not was_cancelled else "stopped"
         })
-        save(d_final)
-    else:
-        d_final = load()
-        d_final["stats"]["total_failed"] = d_final["stats"].get("total_failed", 0) + sent_fail
-        for fb_id, delta in api_usage_delta.items():
-            d_final["stats"].setdefault("api_usage", {}).setdefault(fb_id, {"sent": 0, "failed": 0})
-            d_final["stats"]["api_usage"][fb_id]["failed"] += delta["failed"]
-        save(d_final)
-
-    d_log = load()
-    duration = int(time.time() - start_time)
-    log_activity(d_log, "sms_blast", uid, f"Sent: {sent_ok}, Failed: {sent_fail}")
-    save(d_log)
+    log_activity(d_final, "sms_blast", uid, f"Sent: {sent_ok}, Failed: {sent_fail}")
+    save(d_final)
 
     if sent_ok >= actual_total:
         display_sent = count
@@ -1364,8 +1354,10 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="commands", description="📋 Command list"),
     ]
     try:
+        # Clear any stale default menu first, then set the safe private-user menu.
         await bot.delete_my_commands(scope=BotCommandScopeDefault())
         await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
+        # Per-chat scopes override the regular-user menu for privileged accounts.
         for owner_id in set(SUPER_ADMINS + [MAIN_OWNER]):
             await bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=owner_id))
         d = load()
@@ -2555,7 +2547,7 @@ async def owner_free_toggle(cq: CallbackQuery, state: FSMContext):
         await cq.answer("🔒 Owner only!", show_alert=True)
         return
     d["free_mode"] = (cq.data == "owner:free:on")
-    # Persist and re-read to guarantee the button reflects MongoDB's value.
+    # Persist and re-read to guarantee the button reflects the saved value.
     save(d)
     verified = load()
     status = "FREE MODE ON" if verified.get("free_mode") else "APPROVAL REQUIRED"
@@ -3651,9 +3643,13 @@ from aiogram.types import Update
 async def handle_ping(request):
     """Health/version endpoint; no secrets are returned."""
     try:
-        health = db.health()
-        if health.get("required") and not health.get("connected"):
-            return web.json_response({"status": "unhealthy", "version": _VERSION, "database": health}, status=503)
+        data = load()
+        health = {
+            "storage": "json",
+            "users": len(data.get("users", {})),
+            "firebases": len(data.get("firebases", [])),
+            "redeem_codes": len(data.get("redeem_codes", {})),
+        }
         return web.json_response({"status": "ok", "version": _VERSION, "database": health})
     except Exception as exc:
         return web.json_response({"status": "unhealthy", "version": _VERSION, "database": {"error": str(exc)}}, status=503)
@@ -3692,9 +3688,6 @@ async def main():
         log.error("❌ BOT_TOKEN env var is required. Set it in the host's secrets/dashboard before starting.")
         return
     bot = Bot(token=BOT_TOKEN)
-    # Fail closed in production: never run with temporary local storage.
-    if os.getenv("REQUIRE_MONGODB", "true").lower() not in {"0", "false", "no"}:
-        db.health()  # raises with a clear startup error if MongoDB is unavailable
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(R)
     me = await bot.get_me()

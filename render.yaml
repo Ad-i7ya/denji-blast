@@ -1,4 +1,4 @@
-# Render Blueprint for DENJI BLAST v4.0 (free tier)
+# Render Blueprint for DENJI BLAST v6.0 (VPS/JSON storage)
 # Deploy: Render dashboard -> New -> Blueprint -> paste this repo.
 # After creation, set the BOT_TOKEN secret in Render (Dashboard -> Environment).
 services:
@@ -14,11 +14,6 @@ services:
         sync: false # set manually in the Render dashboard (secret)
       - key: WEBHOOK_PATH
         value: /webhook
-      - key: REQUIRE_MONGODB
-        value: "true"
-      - key: MONGODB_DB
-        value: denji_blast
-      # WEBHOOK_URL is auto-detected from Render's RENDER_EXTERNAL_URL env var.
       # Optional: add Firebase fallbacks (one per line -> Label | https://url.firebaseio.com)
       # - key: FIREBASES
       #   value: |
