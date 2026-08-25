@@ -164,7 +164,14 @@ def save(state: dict[str, Any]) -> None:
         else:
             result = collection.replace_one({"_id": "state", "version": expected}, snapshot, upsert=False)
             if result.modified_count != 1:
-                raise RuntimeError("stale state snapshot rejected")
+                # A concurrent whole-state writer won. Retry from its latest
+                # version rather than turning the Telegram update into HTTP 500.
+                latest = collection.find_one({"_id": "state"}, {"version": 1}) or {}
+                latest_version = int(latest.get("version", expected))
+                snapshot["version"] = latest_version + 1
+                retry = collection.replace_one({"_id": "state", "version": latest_version}, snapshot, upsert=False)
+                if retry.modified_count != 1:
+                    raise RuntimeError("concurrent state update failed")
     except Exception as exc:
         log.exception("MongoDB save failed")
         if REQUIRE_MONGO:
