@@ -1,7 +1,8 @@
-"""Durable bot state storage.
+"""Authoritative durable storage for the bot.
 
-MongoDB is authoritative when MONGODB_URI is configured. JSON is only a local
-fallback; it is never used to overwrite MongoDB after a successful connection.
+Production rule: when MONGODB_URI is configured, MongoDB is mandatory. The
+Render filesystem is never used as a silent fallback, so a database outage
+stops the process instead of pretending to save data that will vanish.
 """
 from __future__ import annotations
 
@@ -10,44 +11,72 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("DenjiBlast.DB")
-
 MONGODB_URI = os.getenv("MONGODB_URI", os.getenv("MONGO_URI", "")).strip()
-MONGODB_DB = os.getenv("MONGODB_DB", "denji_blast")
+MONGODB_DB = os.getenv("MONGODB_DB", "denji_blast").strip() or "denji_blast"
 DATA_FILE = Path(os.getenv("DATA_FILE", "blast_data.json"))
-
+REQUIRE_MONGO = os.getenv("REQUIRE_MONGODB", "true").lower() not in {"0", "false", "no"}
 _client = None
 _collection = None
-_mongo_failed = False
+_last_error: str | None = None
+_last_attempt = 0.0
+_RETRY_AFTER = 30.0
 
 
-def _collection_handle():
-    global _client, _collection, _mongo_failed
+def _mongo():
+    global _client, _collection, _last_error, _last_attempt
     if _collection is not None:
-        return _collection
-    if _mongo_failed or not MONGODB_URI:
+        try:
+            _client.admin.command("ping")
+            return _collection
+        except Exception:
+            _collection = None
+    if _last_attempt and time.time() - _last_attempt < _RETRY_AFTER:
+        if REQUIRE_MONGO:
+            raise RuntimeError(f"MongoDB temporarily unavailable: {_last_error or 'connection retry pending'}")
+        return None
+    _last_attempt = time.time()
+    if not MONGODB_URI:
+        _last_error = "MONGODB_URI is not configured"
+        if REQUIRE_MONGO:
+            raise RuntimeError(_last_error)
         return None
     try:
         from pymongo import MongoClient
         _client = MongoClient(
             MONGODB_URI,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            socketTimeoutMS=10000,
+            serverSelectionTimeoutMS=8000,
+            connectTimeoutMS=8000,
+            socketTimeoutMS=15000,
             retryWrites=True,
         )
         _client.admin.command("ping")
         _collection = _client[MONGODB_DB]["bot_state"]
-        _collection.create_index("_id", unique=True)
-        log.info("MongoDB connected: %s/%s", MONGODB_DB, "bot_state")
+        _last_error = None
+        log.info("MongoDB connected: database=%s collection=bot_state", MONGODB_DB)
         return _collection
     except Exception as exc:
-        _mongo_failed = True
-        log.error("MongoDB unavailable; using local fallback only: %s", exc)
+        _last_error = str(exc)
+        log.exception("MongoDB connection failed")
+        if REQUIRE_MONGO:
+            raise RuntimeError(f"MongoDB is required but unavailable: {exc}") from exc
         return None
+
+
+def health() -> dict[str, Any]:
+    try:
+        collection = _mongo()
+        if collection is None:
+            return {"connected": False, "required": REQUIRE_MONGO, "error": _last_error}
+        collection.database.client.admin.command("ping")
+        doc = collection.find_one({"_id": "state"}, {"version": 1, "updated_at": 1}) or {}
+        return {"connected": True, "required": REQUIRE_MONGO, "version": doc.get("version", 0), "updated_at": doc.get("updated_at")}
+    except Exception as exc:
+        return {"connected": False, "required": REQUIRE_MONGO, "error": str(exc)}
 
 
 def _json_load() -> dict[str, Any]:
@@ -58,21 +87,18 @@ def _json_load() -> dict[str, Any]:
             value = json.load(fh)
         return value if isinstance(value, dict) else {}
     except Exception as exc:
-        # Never delete or silently replace a possibly recoverable state file.
-        backup = DATA_FILE.with_name(DATA_FILE.name + ".corrupt")
+        backup = DATA_FILE.with_name(DATA_FILE.name + f".corrupt.{int(time.time())}")
         try:
             DATA_FILE.replace(backup)
-            log.error("Backed up corrupt state to %s: %s", backup, exc)
+            log.error("Corrupt local state backed up to %s: %s", backup, exc)
         except Exception:
-            log.error("Could not back up corrupt state: %s", exc)
+            log.exception("Could not back up corrupt local state")
         return {}
 
 
 def _json_save(state: dict[str, Any]) -> None:
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(
-        prefix=DATA_FILE.name + ".", suffix=".tmp", dir=str(DATA_FILE.parent)
-    )
+    fd, temp_name = tempfile.mkstemp(prefix=DATA_FILE.name + ".", suffix=".tmp", dir=str(DATA_FILE.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(state, fh, indent=2, ensure_ascii=False)
@@ -84,34 +110,63 @@ def _json_save(state: dict[str, Any]) -> None:
             os.unlink(temp_name)
 
 
+def _migrate_legacy(collection) -> dict[str, Any]:
+    legacy = _json_load()
+    if not legacy:
+        return {}
+    snapshot = copy.deepcopy(legacy)
+    snapshot.update({"_id": "state", "version": 1, "updated_at": int(time.time())})
+    try:
+        collection.insert_one(snapshot)
+        log.info("Migrated legacy local state into MongoDB")
+    except Exception:
+        pass
+    current = collection.find_one({"_id": "state"}) or {}
+    for key in ("_id", "updated_at", "version"):
+        current.pop(key, None)
+    return current
+
+
 def load() -> dict[str, Any]:
-    collection = _collection_handle()
-    if collection is not None:
-        try:
-            document = collection.find_one({"_id": "state"})
-            if document:
-                document.pop("_id", None)
-                return document
-            # One-time migration from local JSON, only if Mongo is empty.
-            legacy = _json_load()
-            if legacy:
-                save(legacy)
-                log.info("Migrated legacy local state into MongoDB")
-                return copy.deepcopy(legacy)
-            return {}
-        except Exception as exc:
-            log.error("MongoDB load failed; retaining local fallback: %s", exc)
-    return _json_load()
+    collection = _mongo()
+    if collection is None:
+        return _json_load()
+    try:
+        document = collection.find_one({"_id": "state"})
+        if not document:
+            return _migrate_legacy(collection)
+        for key in ("_id", "updated_at", "version"):
+            document.pop(key, None)
+        return document
+    except Exception as exc:
+        log.exception("MongoDB load failed")
+        if REQUIRE_MONGO:
+            raise RuntimeError(f"MongoDB load failed: {exc}") from exc
+        return _json_load()
 
 
 def save(state: dict[str, Any]) -> None:
+    """Write state with an atomic compare-and-swap version check."""
+    collection = _mongo()
+    if collection is None:
+        _json_save(state)
+        return
     snapshot = copy.deepcopy(state)
-    collection = _collection_handle()
-    if collection is not None:
-        try:
-            snapshot["_id"] = "state"
-            collection.replace_one({"_id": "state"}, snapshot, upsert=True)
-            return
-        except Exception as exc:
-            log.error("MongoDB save failed; writing local fallback: %s", exc)
-    _json_save(state)
+    try:
+        current = collection.find_one({"_id": "state"}, {"version": 1})
+        expected = int((current or {}).get("version", 0))
+        snapshot.update({"_id": "state", "version": expected + 1, "updated_at": int(time.time())})
+        if current is None:
+            result = collection.update_one({"_id": {"$exists": False}}, {"$setOnInsert": snapshot}, upsert=True)
+            # If another writer inserted first, do not overwrite it.
+            if result.upserted_id is None:
+                raise RuntimeError("concurrent initialization rejected")
+        else:
+            result = collection.replace_one({"_id": "state", "version": expected}, snapshot, upsert=False)
+            if result.modified_count != 1:
+                raise RuntimeError("stale state snapshot rejected")
+    except Exception as exc:
+        log.exception("MongoDB save failed")
+        if REQUIRE_MONGO:
+            raise RuntimeError(f"MongoDB save failed: {exc}") from exc
+        _json_save(state)

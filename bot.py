@@ -3613,7 +3613,14 @@ from aiohttp import web
 from aiogram.types import Update
 
 async def handle_ping(request):
-    return web.Response(text="OK")
+    """Health endpoint includes database state without exposing secrets."""
+    try:
+        health = db.health()
+        if health.get("required") and not health.get("connected"):
+            return web.json_response({"status": "unhealthy", "database": health}, status=503)
+        return web.json_response({"status": "ok", "database": health})
+    except Exception as exc:
+        return web.json_response({"status": "unhealthy", "database": {"error": str(exc)}}, status=503)
 
 async def handle_webhook(request: web.Request, dp: Dispatcher, bot: Bot):
     try:
@@ -3649,6 +3656,9 @@ async def main():
         log.error("❌ BOT_TOKEN env var is required. Set it in the host's secrets/dashboard before starting.")
         return
     bot = Bot(token=BOT_TOKEN)
+    # Fail closed in production: never run with temporary local storage.
+    if os.getenv("REQUIRE_MONGODB", "true").lower() not in {"0", "false", "no"}:
+        db.health()  # raises with a clear startup error if MongoDB is unavailable
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(R)
     me = await bot.get_me()
