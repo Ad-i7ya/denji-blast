@@ -242,10 +242,11 @@ def _load_firebases_from_env(d: dict):
 def load() -> dict:
     """Load all state from MongoDB, retaining the existing schema/defaults."""
     remote = db.load()
-    if remote:
+    if remote and all(key in remote for key in ("users", "firebases", "redeem_codes", "admins", "owners", "settings", "stats", "force_join")):
         data = remote
     elif os.getenv("MONGODB_URI", "").strip():
-        data = {}
+        # Do not initialize defaults over a partial remote document.
+        raise RuntimeError("MongoDB state is incomplete; refusing to overwrite it")
     elif os.path.exists(_DATA_FILE):
         try:
             with open(_DATA_FILE, "r", encoding="utf-8") as f:

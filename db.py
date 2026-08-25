@@ -104,12 +104,13 @@ def _json_save(state: dict[str, Any]) -> None:
 
 
 def _safe_state(state: dict[str, Any]) -> bool:
-    """Reject snapshots that would erase known production data."""
+    """Reject malformed/partial snapshots that could erase bot state."""
     if not isinstance(state, dict):
         return False
-    if not any(key in state for key in ("users", "firebases", "redeem_codes", "admins", "owners", "settings")):
+    required = {"users", "firebases", "redeem_codes", "admins", "owners", "settings", "stats", "force_join"}
+    if not required.issubset(state):
         return False
-    return True
+    return all(isinstance(state.get(key), (dict, list, bool, int, str)) for key in required)
 
 
 def _migrate_legacy(collection) -> dict[str, Any]:
@@ -148,7 +149,7 @@ def load() -> dict[str, Any]:
 
 
 def save(state: dict[str, Any]) -> None:
-    """Save complete state without allowing empty snapshots to erase data."""
+    """Save complete state without allowing partial snapshots to erase data."""
     if not _safe_state(state):
         raise RuntimeError("Refusing to persist invalid or empty state")
     collection = _mongo()
