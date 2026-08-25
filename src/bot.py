@@ -48,7 +48,7 @@ PREMIUM_CONTACT = "@te4m1ord"     # contact for premium/payment
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 _DATA_FILE = os.getenv("DATA_FILE", "blast_data.json")
-_VERSION = "v4.0-DENJI"
+_VERSION = "v5.0-RICH-DENJI"
 _PROGRESS_UPDATE_INTERVAL = 0.15
 _BACKGROUND_SCAN_INTERVAL = 60.0
 
@@ -822,7 +822,7 @@ def owner_panel_text(d: dict) -> str:
     protected_count = len(PROTECTED_NUMBERS)
 
     return (
-        f"👑 <b>DENJI BLAST - OWNER PANEL</b>\n"
+        f"<blockquote>👑 <b>DENJI BLAST {_VERSION} · RICH UI</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔥 Firebase DBs   : <b>{len(fbs)}</b>\n"
         f"👑 Super Admins   : <b>{len(owners)}/6</b>\n"
@@ -839,7 +839,7 @@ def owner_panel_text(d: dict) -> str:
         f"🔒 Protected      : <b>{protected_count}</b>\n"
         f"📱 Devices        : <b>{scan_info}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+        f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</blockquote>"
     )
 
 def admin_panel_text(d: dict) -> str:
@@ -852,7 +852,7 @@ def admin_panel_text(d: dict) -> str:
     protected_count = len(PROTECTED_NUMBERS)
 
     return (
-        f"🛡️ <b>DENJI BLAST - ADMIN PANEL</b>\n"
+        f"<blockquote>🛡️ <b>DENJI BLAST {_VERSION} · ADMIN UI</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👥 Total Users    : <b>{len(users)}</b>\n"
         f"🚫 Banned         : <b>{len(banned)}</b>\n"
@@ -864,7 +864,7 @@ def admin_panel_text(d: dict) -> str:
         f"🔐 Access Mode    : <b>{mode}</b>\n"
         f"📱 Devices        : <b>{scan_info}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+        f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</blockquote>"
     )
 
 def user_home_text(uid: int, d: dict) -> str:
@@ -3639,14 +3639,14 @@ from aiohttp import web
 from aiogram.types import Update
 
 async def handle_ping(request):
-    """Health endpoint includes database state without exposing secrets."""
+    """Health/version endpoint; no secrets are returned."""
     try:
         health = db.health()
         if health.get("required") and not health.get("connected"):
-            return web.json_response({"status": "unhealthy", "database": health}, status=503)
-        return web.json_response({"status": "ok", "database": health})
+            return web.json_response({"status": "unhealthy", "version": _VERSION, "database": health}, status=503)
+        return web.json_response({"status": "ok", "version": _VERSION, "database": health})
     except Exception as exc:
-        return web.json_response({"status": "unhealthy", "database": {"error": str(exc)}}, status=503)
+        return web.json_response({"status": "unhealthy", "version": _VERSION, "database": {"error": str(exc)}}, status=503)
 
 async def handle_webhook(request: web.Request, dp: Dispatcher, bot: Bot):
     try:
